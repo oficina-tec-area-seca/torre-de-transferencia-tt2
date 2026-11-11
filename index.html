@@ -69,6 +69,12 @@ input[type=search]{width:100%;background:var(--bg);border:1px solid var(--line);
 textarea{width:100%;min-height:90px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:4px;font-family:var(--f-mono);font-size:12px;padding:8px}
 .note{font-size:12.5px;color:var(--muted);margin:8px 0 0;max-width:65ch}
 .toast{font-size:12.5px;color:var(--ok);align-self:center}
+.srch{flex:1 1 100%;position:relative;margin-top:4px}
+.srch input{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:9px 12px 9px 34px;font-size:16px}
+.srch .ico{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none;font-size:15px}
+.sr-box{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-height:min(60vh,420px);overflow:auto;padding:0 12px}
+.sr-box .cnt{font-size:12px;color:var(--muted);padding:7px 0 3px}
+.sr-box li .pill{justify-self:end}
 .sync{font-size:12px;font-family:var(--f-mono);color:var(--muted)}.sync.ok{color:var(--ok)}.sync.err{color:var(--missing)}
 @media (min-width:900px){
   .app{grid-template-columns:minmax(0,1fr) 370px;grid-template-rows:auto minmax(0,1fr)}
@@ -83,6 +89,11 @@ textarea{width:100%;min-height:90px;background:var(--bg);color:var(--fg);border:
     <h1>Torre TT2</h1>
     <span class="sub">1251-CV-1341 · Plano 4-08070-1251-S-DW-P3-00216 · modelo representativo</span>
     <div class="stats"><span>Piezas <b id="st-n">0</b></span><span class="f">Faltantes <b id="st-f">0</b></span><span class="f">Pendiente <b id="st-kg">0</b> kg</span><span class="sync" id="sync">Conectando…</span></div>
+    <div class="srch" role="search">
+      <span class="ico" aria-hidden="true">&#9906;</span>
+      <input type="search" id="sq" placeholder="Buscar pieza (ej. DV11, MO17, BH400)" autocomplete="off" enterkeyhint="search" aria-label="Buscar pieza">
+      <div class="sr-box" id="sr" hidden></div>
+    </div>
   </header>
   <div class="stage">
     <canvas id="cv" aria-label="Modelo 3D de la Torre TT2"></canvas>
@@ -101,10 +112,7 @@ textarea{width:100%;min-height:90px;background:var(--bg);color:var(--fg);border:
     <div class="body" id="t-pieza"></div>
     <div class="body" id="t-falt" hidden></div>
     <div class="body" id="t-capas" hidden>
-      <label class="f" for="q">Buscar marca (ej. DV00011, MO00017)</label>
-      <input type="search" id="q" placeholder="marca o perfil" autocomplete="off">
-      <ul class="list" id="q-res"></ul>
-      <label class="f" style="margin-top:10px">Tipos visibles</label>
+      <label class="f">Tipos visibles</label>
       <div class="row" id="chips"></div>
       <label class="f" for="cut">Mostrar hasta: <b id="cut-l">todo</b></label>
       <input type="range" id="cut" min="0" max="24" step="0.05" value="24">
@@ -560,11 +568,39 @@ var chips=$('#chips');Object.keys(TIPOS).forEach(function(k){var b=document.crea
   b.addEventListener('click',function(){if(hiddenTypes.has(k))hiddenTypes.delete(k);else hiddenTypes.add(k);b.setAttribute('aria-pressed',!hiddenTypes.has(k));paint()});chips.appendChild(b)});
 $('#cut').addEventListener('input',function(e){cut=+e.target.value;$('#cut-l').textContent=cut>=24?'todo':EL(cut);paint()});
 $('#dim').addEventListener('click',function(){dim=!dim;$('#dim').setAttribute('aria-pressed',dim);paint()});
-$('#q').addEventListener('input',function(e){var q=e.target.value.trim().toLowerCase(),ul=$('#q-res');
-  if(q.length<2){ul.innerHTML='';return}
-  var r=PIECES.filter(function(p){return (p.id+' '+p.perfil).toLowerCase().indexOf(q)>=0}).slice(0,8);
-  ul.innerHTML=r.length?r.map(function(p){return '<li data-id="'+esc(p.id)+'"><span class="marca">'+esc(p.id)+'</span><span class="kg">'+esc(p.perfil)+'</span><span class="d">'+esc(p.ubic)+'</span></li>'}).join(''):'<li><span class="d">Sin coincidencias en el modelo. No modeladas: '+esc(NO_MODELADAS)+'</span></li>';
-  ul.querySelectorAll('li[data-id]').forEach(function(li){li.addEventListener('click',function(){select(li.dataset.id)})})});
+/* ---- buscador ---- */
+function nrm(s){return String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[\s\-_.\/]+/g,'')}
+function corto(id){return id.replace(/^([A-Za-z]+)0*(\d)/,'$1$2')}
+var IDX=PIECES.map(function(p){return {p:p,id:nrm(p.id),c:nrm(corto(p.id)),txt:nrm(p.id+corto(p.id)+p.perfil+p.ubic+TIPOS[p.tipo][0])}});
+function buscar(q){var tk=q.toLowerCase().split(/\s+/).map(nrm).filter(Boolean);if(!tk.length)return[];
+  var all=nrm(q);
+  return IDX.filter(function(x){var t=x.txt,st=missing.has(x.p.id)?'faltante':'montado';
+      if(x.c.indexOf(all)===0||x.id.indexOf(all)===0)return true;
+      return tk.every(function(k){return t.indexOf(k)>=0||(k.length>=4&&st.indexOf(k)===0)})})
+    .map(function(x){var s=(x.id===all||x.c===all||x.c.indexOf(all+'')===0&&!/\d/.test(x.c.charAt(all.length)))?0:(x.id.indexOf(all)===0||x.c.indexOf(all)===0)?1:(x.id.indexOf(tk[0])===0||x.c.indexOf(tk[0])===0)?2:3;return [s,x.p]})
+    .sort(function(a,b){return a[0]-b[0]||(a[1].id<b[1].id?-1:1)}).map(function(a){return a[1]})}
+var SR=[];
+function mostrar(){var q=$('#sq').value.trim(),box=$('#sr');
+  if(!q){box.hidden=true;return}
+  SR=buscar(q);var n=SR.length,v=SR.slice(0,40);
+  box.innerHTML='<div class="cnt">'+(n?n+(n===1?' pieza':' piezas')+(n>40?' · mostrando 40, escribe más para afinar':''):'Sin coincidencias en el modelo.'+(NO_MODELADAS?' No modeladas: '+esc(NO_MODELADAS):''))+'</div>'+
+    (n?'<ul class="list">'+v.map(function(p){var m=missing.has(p.id);return '<li data-id="'+esc(p.id)+'"><span class="marca">'+esc(p.id)+'</span><span class="pill '+(m?'no':'ok')+'">'+(m?'Faltante':'Montado')+'</span><span class="d">'+esc(TIPOS[p.tipo][0])+' · '+esc(p.perfil)+' · '+esc(p.ubic)+(p.kg?' · '+kg(p.kg):'')+'</span></li>'}).join('')+'</ul>':'');
+  box.hidden=false;
+  box.querySelectorAll('li[data-id]').forEach(function(li){li.addEventListener('click',function(){ir(li.dataset.id)})})}
+function ir(id){var p=byId[id];if(!p)return;
+  $('#sr').hidden=true;$('#sq').blur();
+  if(hiddenTypes.has(p.tipo)){hiddenTypes.delete(p.tipo);chips.querySelectorAll('.chip').forEach(function(b,i){if(Object.keys(TIPOS)[i]===p.tipo)b.setAttribute('aria-pressed','true')})}
+  if(p.zmin>cut+0.01){cut=24;$('#cut').value=24;$('#cut-l').textContent='todo'}
+  select(id);
+  /* acercar la cámara a la pieza */
+  var bx=new THREE.Box3();p.meshes.forEach(function(m){bx.expandByObject(m)});if(bx.isEmpty())return;
+  var c=bx.getCenter(new THREE.Vector3()),sz=bx.getSize(new THREE.Vector3()).length();
+  var t0=tgt.clone(),r0=rad,r1=Math.max(9,Math.min(40,sz*2.2+6)),st=performance.now();
+  (function anim(now){var k=Math.min(1,(now-st)/450),e=k*(2-k);tgt.lerpVectors(t0,c,e);rad=r0+(r1-r0)*e;place();if(k<1)requestAnimationFrame(anim)})(st)}
+$('#sq').addEventListener('input',mostrar);
+$('#sq').addEventListener('focus',function(){if($('#sq').value.trim())mostrar()});
+$('#sq').addEventListener('keydown',function(e){if(e.key==='Enter'&&SR.length){e.preventDefault();ir(SR[0].id)}else if(e.key==='Escape'){$('#sr').hidden=true;$('#sq').blur()}});
+document.addEventListener('pointerdown',function(e){if(!e.target.closest('.srch'))$('#sr').hidden=true});
 document.querySelectorAll('#views button').forEach(function(b){b.addEventListener('click',function(){var v=VW[b.dataset.v];th=v[0];ph=v[1];tgt.set(4.6,11,-5);rad=b.dataset.v==='pl'?46:52;
   document.querySelectorAll('#views button').forEach(function(x){x.setAttribute('aria-pressed',x===b)});place()})});
 
