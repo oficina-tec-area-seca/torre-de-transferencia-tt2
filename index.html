@@ -69,6 +69,7 @@ input[type=search]{width:100%;background:var(--bg);border:1px solid var(--line);
 textarea{width:100%;min-height:90px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:4px;font-family:var(--f-mono);font-size:12px;padding:8px}
 .note{font-size:12.5px;color:var(--muted);margin:8px 0 0;max-width:65ch}
 .toast{font-size:12.5px;color:var(--ok);align-self:center}
+.sync{font-size:12px;font-family:var(--f-mono);color:var(--muted)}.sync.ok{color:var(--ok)}.sync.err{color:var(--missing)}
 @media (min-width:900px){
   .app{grid-template-columns:minmax(0,1fr) 370px;grid-template-rows:auto minmax(0,1fr)}
   header{grid-column:1/-1}
@@ -81,7 +82,7 @@ textarea{width:100%;min-height:90px;background:var(--bg);color:var(--fg);border:
   <header>
     <h1>Torre TT2</h1>
     <span class="sub">1251-CV-1341 · Plano 4-08070-1251-S-DW-P3-00216 · modelo representativo</span>
-    <div class="stats"><span>Piezas <b id="st-n">0</b></span><span class="f">Faltantes <b id="st-f">0</b></span><span class="f">Pendiente <b id="st-kg">0</b> kg</span></div>
+    <div class="stats"><span>Piezas <b id="st-n">0</b></span><span class="f">Faltantes <b id="st-f">0</b></span><span class="f">Pendiente <b id="st-kg">0</b> kg</span><span class="sync" id="sync">Conectando…</span></div>
   </header>
   <div class="stage">
     <canvas id="cv" aria-label="Modelo 3D de la Torre TT2"></canvas>
@@ -349,6 +350,20 @@ var NO_MODELADAS='Placas y conexiones (CN, PL, SP, LN, MI) y las barandas que no
 </script>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+/* Firebase: mismo proyecto que el Pañol Digital. Los faltantes se guardan en Firestore → colección tt2, documento faltantes. */
+window.FIREBASE_CONFIG = {
+  apiKey: "AIzaSyB_XmxJGzZP4BS44vdogU78F43stoUSYpE",
+  authDomain: "panol-digital-917d0.firebaseapp.com",
+  projectId: "panol-digital-917d0",
+  storageBucket: "panol-digital-917d0.firebasestorage.app",
+  messagingSenderId: "144403621586",
+  appId: "1:144403621586:web:8bddf6aeec98964f992f0b"
+};
+</script>
 <script id="app">
 (function(){
 var $=function(s){return document.querySelector(s)};
@@ -360,6 +375,41 @@ var byId={};PIECES.forEach(function(p){byId[p.id]=p});
 var missing=new Set(FALTANTES_BASE), selected=null, hiddenTypes=new Set(), cut=24, dim=false;
 try{var sv=JSON.parse(localStorage.getItem('tt2-faltantes')||'null');if(sv&&sv.v===BASE_VERSION)missing=new Set(sv.ids.filter(function(i){return byId[i]}))}catch(e){}
 function save(){try{localStorage.setItem('tt2-faltantes',JSON.stringify({v:BASE_VERSION,ids:Array.from(missing)}))}catch(e){}}
+
+/* ---- sincronización compartida (Firestore) ---- */
+var REF=null, FV=null, sync=function(t,c){var e=$('#sync');if(e){e.textContent=t;e.className='sync'+(c?' '+c:'')}};
+function nube(cambio){if(!REF)return;cambio.t=FV.serverTimestamp();
+  REF.set(cambio,{merge:true}).catch(function(e){sync('No se guardó: '+(e.code||'error'),'err')})}
+function marcar(id,on){if(on)missing.add(id);else missing.delete(id);save();refresh();
+  nube({ids:on?FV.arrayUnion(id):FV.arrayRemove(id)})}
+function limpiar(){missing.clear();save();refresh();nube({ids:[]})}
+function conectar(){
+  var cfg=window.FIREBASE_CONFIG;
+  if(!window.firebase||!cfg){sync('Sin conexión · solo en este equipo','err');return}
+  var app;try{app=firebase.app('tt2')}catch(e){app=firebase.initializeApp(cfg,'tt2')}   // app aparte: no toca la sesión del Pañol
+  var db=app.firestore();FV=firebase.firestore.FieldValue;
+  db.enablePersistence({synchronizeTabs:true}).catch(function(){}).then(function(){
+    var auth=app.auth();
+    auth.onAuthStateChanged(function(u){
+      if(!u){auth.signInAnonymously().catch(function(e){sync('Error de acceso: '+(e.code||'')+' — activa «Anónimo» en Firebase','err')});return}
+      REF=db.collection('tt2').doc('faltantes');
+      var primera=true;
+      REF.onSnapshot({includeMetadataChanges:true},function(s){
+        if(primera&&!s.metadata.fromCache){primera=false;   // espera la respuesta real del servidor antes de sembrar
+          /* una sola vez por equipo: sube lo que se había marcado antes en este celular */
+          var ya=false;try{ya=localStorage.getItem('tt2-migrado')==='1'}catch(e){}
+          var local=Array.from(missing).filter(function(i){return FALTANTES_BASE.indexOf(i)<0});
+          if(!s.exists)REF.set({ids:FALTANTES_BASE.concat(local),t:FV.serverTimestamp()},{merge:true});
+          else if(!ya&&local.length)REF.set({ids:FV.arrayUnion.apply(FV,local),t:FV.serverTimestamp()},{merge:true});
+          try{localStorage.setItem('tt2-migrado','1')}catch(e){}
+        }
+        if(s.exists){var d=s.data()||{};missing=new Set((d.ids||[]).filter(function(i){return byId[i]}));save();refresh()}
+        var off=s.metadata.fromCache;
+        sync(s.metadata.hasPendingWrites?'Guardando…':(off?'Sin señal · se sube al volver':'Sincronizado ✓'),off?'':'ok');
+      },function(e){sync('Error: '+(e.code||'')+' — revisa las reglas de Firestore','err')});
+    });
+  });
+}
 
 if(!window.THREE){$('#t-pieza').innerHTML='<p class="empty">No se pudo cargar el motor 3D. Revisa la conexión y vuelve a abrir la página.</p>';return}
 
@@ -483,7 +533,7 @@ function renderPieza(){var el=$('#t-pieza'),p=selected&&byId[selected];
     '<dl class="kv"><dt>Tipo</dt><dd>'+TIPOS[p.tipo][0]+'</dd><dt>Perfil</dt><dd>'+esc(p.perfil)+'</dd><dt>Ubicación</dt><dd>'+esc(p.ubic)+'</dd>'+
     '<dt>Peso lista</dt><dd>'+kg(p.kg)+'</dd><dt>Estado</dt><dd><span class="pill '+(miss?'no':'ok')+'">'+(miss?'FALTANTE':'MONTADO')+'</span>'+(p.aprox?' <span class="pill ap">ubicación aprox.</span>':'')+'</dd></dl>'+
     '<div class="act"><button class="btn primary" id="tg">'+(miss?'Marcar como montado':'Marcar como faltante')+'</button><button class="btn" id="ds">Quitar selección</button></div>';
-  $('#tg').addEventListener('click',function(){if(missing.has(p.id))missing.delete(p.id);else missing.add(p.id);save();refresh()});
+  $('#tg').addEventListener('click',function(){marcar(p.id,!missing.has(p.id))});
   $('#ds').addEventListener('click',function(){select(null)})}
 
 function listaTexto(){var a=PIECES.filter(function(p){return missing.has(p.id)}),tot=a.reduce(function(s,p){return s+p.kg},0);
@@ -496,7 +546,7 @@ function renderFalt(){var el=$('#t-falt'),a=PIECES.filter(function(p){return mis
   el.querySelectorAll('li').forEach(function(li){li.addEventListener('click',function(){select(li.dataset.id)})});
   $('#cp').addEventListener('click',function(){var t=listaTexto(),done=function(){$('#ts').textContent='Lista copiada'},fb=function(){var x=$('#tx');x.hidden=false;x.value=t;x.focus();x.select();$('#ts').textContent='Selecciona y copia el texto'};
     try{navigator.clipboard.writeText(t).then(done,fb)}catch(e){fb()}});
-  $('#cl').addEventListener('click',function(){var b=$('#cl');if(b.dataset.ok){missing.clear();save();refresh()}else{b.dataset.ok=1;b.textContent='Confirmar: borrar todos'}})}
+  $('#cl').addEventListener('click',function(){var b=$('#cl');if(b.dataset.ok){limpiar()}else{b.dataset.ok=1;b.textContent='Confirmar: borrar todos'}})}
 
 function stats(){var a=PIECES.filter(function(p){return missing.has(p.id)});
   $('#st-n').textContent=PIECES.length;$('#st-f').textContent=a.length;$('#st-kg').textContent=Math.round(a.reduce(function(s,p){return s+p.kg},0)).toLocaleString('es-CL');
@@ -520,6 +570,7 @@ document.querySelectorAll('#views button').forEach(function(b){b.addEventListene
 
 $('#nomod').textContent='Sin modelar: '+NO_MODELADAS+' Falta solo BA00018.';
 sceneColor();resize();place();refresh();
+conectar();
 })();
 </script>
 
