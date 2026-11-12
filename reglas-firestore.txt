@@ -1,0 +1,128 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signed() { return request.auth != null && request.auth.token.email != null; }
+    function myEmail() { return request.auth.token.email.lower(); }
+    function memberDoc(p) { return /databases/$(database)/documents/panoles/$(p)/miembros/$(request.auth.uid); }
+    function isMember(p) { return signed() && exists(memberDoc(p)); }
+    function role(p) { return get(memberDoc(p)).data.rol; }
+    function canWrite(p) { return isMember(p) && role(p) in ['admin', 'panolero']; }
+    function isAdmin(p) { return isMember(p) && role(p) == 'admin'; }
+    function invite() { return get(/databases/$(database)/documents/invitaciones/$(myEmail())).data; }
+
+    // Invitaciones: cada persona lee solo la suya; solo el administrador del pañol las crea o anula
+    match /invitaciones/{mail} {
+      allow read: if signed() && mail == myEmail();
+      allow create, update: if isAdmin(request.resource.data.panol);
+      allow delete: if signed() && (mail == myEmail() || isAdmin(resource.data.panol));
+    }
+
+    // Qué pañol usa cada usuario (solo el propio)
+    match /usuarios/{uid} {
+      allow read, write: if signed() && uid == request.auth.uid;
+    }
+
+    // Documento principal del pañol: lo crea una sola vez quien queda de administrador
+    match /panoles/{p} {
+      allow read: if isMember(p);
+      allow create: if signed() && request.resource.data.owner == request.auth.uid;
+      allow update: if isAdmin(p);
+    }
+
+    // Miembros y roles
+    match /panoles/{p}/miembros/{uid} {
+      allow read: if isMember(p);
+      allow create: if signed() && uid == request.auth.uid && (
+        (getAfter(/databases/$(database)/documents/panoles/$(p)).data.owner == request.auth.uid
+          && request.resource.data.rol == 'admin')
+        || (invite().panol == p && invite().rol == request.resource.data.rol)
+      );
+      allow update, delete: if isAdmin(p);
+    }
+
+    // Datos del pañol: miembros leen; pañolero y admin escriben; ajustes e invitaciones solo admin
+    match /panoles/{p}/{coleccion}/{doc} {
+      allow read: if isMember(p);
+      allow write: if coleccion != 'miembros' && (
+        ((coleccion == 'config' || coleccion == 'invitaciones') && isAdmin(p))
+        || (coleccion != 'config' && coleccion != 'invitaciones' && canWrite(p))
+      );
+    }
+
+    // ================= Credencial Digital =================
+    function cMem(o) { return /databases/$(database)/documents/credOrg/$(o)/miembros/$(request.auth.uid); }
+    function cIsMember(o) { return signed() && exists(cMem(o)); }
+    function cRole(o) { return get(cMem(o)).data.rol; }
+    function cEditor(o) { return cIsMember(o) && cRole(o) in ['admin', 'editor']; }
+    function cAdmin(o) { return cIsMember(o) && cRole(o) == 'admin'; }
+    function cInvite() { return get(/databases/$(database)/documents/credInv/$(myEmail())).data; }
+
+    // Ficha pública: se abre solo con el código exacto del QR; nadie puede listar todas
+    match /credPublic/{token} {
+      allow get: if true;
+      allow list: if false;
+      allow create, update: if cEditor(request.resource.data.org);
+      allow delete: if signed() && cEditor(resource.data.org);
+    }
+    match /credInv/{mail} {
+      allow read: if signed() && mail == myEmail();
+      allow create, update: if cAdmin(request.resource.data.org);
+      allow delete: if signed() && (mail == myEmail() || cAdmin(resource.data.org));
+    }
+    match /credUser/{uid} {
+      allow read, write: if signed() && uid == request.auth.uid;
+    }
+    match /credOrg/{o} {
+      allow read: if cIsMember(o);
+      allow create: if signed() && request.resource.data.owner == request.auth.uid;
+      allow update: if cAdmin(o);
+    }
+    match /credOrg/{o}/miembros/{uid} {
+      allow read: if cIsMember(o);
+      allow create: if signed() && uid == request.auth.uid && (
+        (getAfter(/databases/$(database)/documents/credOrg/$(o)).data.owner == request.auth.uid
+          && request.resource.data.rol == 'admin')
+        || (cInvite().org == o && cInvite().rol == request.resource.data.rol)
+      );
+      allow update, delete: if cAdmin(o);
+    }
+    match /credOrg/{o}/{coleccion}/{doc} {
+      allow read: if cIsMember(o);
+      allow write: if coleccion != 'miembros' && (
+        ((coleccion == 'config' || coleccion == 'invitaciones') && cAdmin(o))
+        || (coleccion != 'config' && coleccion != 'invitaciones' && cEditor(o))
+      );
+    }
+
+    // ================= Visor 3D (Torre TT2 y porta carretes) =================
+    // Todos pueden ver. Para marcar hace falta el PIN guardado en tt2cfg/acceso.
+    function v3Cfg() { return get(/databases/$(database)/documents/tt2cfg/acceso).data; }
+    function v3Ed() { return get(/databases/$(database)/documents/tt2editores/$(request.auth.uid)).data; }
+    function v3Editor() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/tt2editores/$(request.auth.uid))
+        && ((v3Ed().rol == 'editor' && v3Ed().pin == v3Cfg().pin)
+          || (v3Ed().rol == 'admin' && v3Ed().pin == v3Cfg().pinAdmin));
+    }
+    function v3Admin() { return v3Editor() && v3Ed().rol == 'admin'; }
+
+    match /tt2/{doc} {
+      allow read: if request.auth != null;
+      allow create: if v3Editor();
+      // un editor cambia de a una pieza; borrar muchas de una vez («Limpiar todo») es solo para el administrador
+      allow update: if v3Editor()
+        && (v3Admin() || request.resource.data.ids.size() >= resource.data.ids.size() - 1);
+    }
+    match /tt2/{doc}/historial/{h} {
+      allow read: if request.auth != null;
+      allow create: if v3Editor() && request.resource.data.uid == request.auth.uid;
+    }
+    match /tt2editores/{uid} {
+      allow read, delete: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && ((request.resource.data.rol == 'editor' && request.resource.data.pin == v3Cfg().pin)
+          || (request.resource.data.rol == 'admin' && request.resource.data.pin == v3Cfg().pinAdmin));
+    }
+  }
+}
